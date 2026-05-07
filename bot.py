@@ -33,16 +33,24 @@ class DestinyBot(commands.Bot):
             json.dump(self.price_alerts, f, indent=4)
 
     async def setup_hook(self):
-        try:
-            securities = await self.nepse.security_client.get_securities()
-            self.all_symbols = [s.symbol for s in securities]
-            print(f"✅ Loaded {len(self.all_symbols)} NEPSE symbols!")
-        except Exception as e:
-            print(f"⚠️ API Fetch Error: {e}")
-            self.all_symbols = ["NABIL", "ADBL", "NICA", "NIFRA", "UPPER"]
+        print("🔄 Fetching NEPSE symbols...")
+        for attempt in range(3):
+            try:
+                securities = await self.nepse.security_client.get_securities()
+                self.all_symbols = [s.symbol for s in securities]
+                if self.all_symbols:
+                    print(f"✅ Successfully loaded {len(self.all_symbols)} symbols!")
+                    break
+            except Exception as e:
+                print(f"⚠️ Attempt {attempt+1} failed: {e}")
+                await asyncio.sleep(3)
         
-        # Syncing globally (can take 1 hour)
+        if not self.all_symbols:
+            self.all_symbols = ["NABIL", "NICA", "ADBL", "UPPER", "HIDCL", "NIFRA"]
+            
         await self.tree.sync()
+        if not self.market_check_loop.is_running():
+            self.market_check_loop.start()
 
     @tasks.loop(seconds=30)
     async def market_check_loop(self):
@@ -54,64 +62,43 @@ class DestinyBot(commands.Bot):
                 if symbol in self.live_tracking:
                     chan = self.get_channel(self.live_tracking[symbol])
                     if chan: await chan.send(f"🕒 **Update:** {symbol} is Rs. {price}")
-                if symbol in self.price_alerts:
-                    a = self.price_alerts[symbol]
-                    if price >= a['max'] or price <= a['low']:
-                        chan = self.get_channel(a['channel'])
-                        status = "🚀 MAX" if price >= a['max'] else "📉 LOW"
-                        if chan: await chan.send(f"🔔 **{status} ALERT:** {symbol} hit {price}!")
-                        del self.price_alerts[symbol]
-                        self.save_data()
             except: continue
 
 bot = DestinyBot()
 
-# --- COMMANDS ---
-
 @bot.tree.command(name="price", description="Check live stock price")
 async def price_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
-    clean_symbol = symbol.strip().upper()
+    sym = symbol.strip().upper()
     try:
-        data = await bot.nepse.security_client.get_company(symbol=clean_symbol)
-        embed = discord.Embed(title=f"📊 {clean_symbol}", color=discord.Color.blue())
-        embed.add_field(name="LTP", value=f"Rs. {data.last_traded_price}", inline=False)
-        embed.set_footer(text="Destiny-v2 • NEPSE Live")
+        # We use a direct fetch here to bypass the list cache
+        data = await bot.nepse.security_client.get_company(symbol=sym)
+        embed = discord.Embed(title=f"📊 {sym}", color=0x2f3136)
+        embed.add_field(name="Current Price (LTP)", value=f"**Rs. {data.last_traded_price}**", inline=False)
+        embed.add_field(name="High/Low", value=f"H: {data.high_price} | L: {data.low_price}", inline=True)
+        embed.set_footer(text="Destiny V2 • NEPSE Live Data")
         await interaction.followup.send(embed=embed)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Could not find '{clean_symbol}'. Make sure it's a valid symbol.")
+    except:
+        await interaction.followup.send(f"❌ API Error: Could not get data for **{sym}**. The NEPSE server might be busy.")
 
 @price_cmd.autocomplete('symbol')
 async def stock_auto(interaction: discord.Interaction, current: str):
-    if not current:
-        return [app_commands.Choice(name=s, value=s) for s in bot.all_symbols[:10]]
+    if not current: return [app_commands.Choice(name=s, value=s) for s in bot.all_symbols[:10]]
     matches = process.extract(current, bot.all_symbols, limit=10)
-    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches if m[1] > 40]
+    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches if m[1] > 35]
 
-@bot.tree.command(name="track", description="Get price updates every 30 seconds")
+@bot.tree.command(name="track", description="Track stock every 30s")
 async def track(interaction: discord.Interaction, symbol: str):
-    sym = symbol.strip().upper()
-    bot.live_tracking[sym] = interaction.channel_id
-    if not bot.market_check_loop.is_running():
-        bot.market_check_loop.start()
-    await interaction.response.send_message(f"📡 Now tracking **{sym}** every 30s in this channel.")
+    bot.live_tracking[symbol.upper()] = interaction.channel_id
+    await interaction.response.send_message(f"📡 Tracking {symbol.upper()} started.")
 
-@bot.tree.command(name="stop", description="Stop all tracking and alerts")
+@bot.tree.command(name="stop", description="Stop all tracking")
 async def stop(interaction: discord.Interaction):
     bot.live_tracking.clear()
-    bot.price_alerts.clear()
-    bot.save_data()
-    await interaction.response.send_message("🛑 All active tracking and alerts have been cleared.")
-
-# --- ADMIN COMMAND (Instant Sync) ---
-@bot.command()
-@commands.is_owner()
-async def sync(ctx):
-    await bot.tree.sync()
-    await ctx.send("✅ Commands forced to sync globally! Wait 5 mins.")
+    await interaction.response.send_message("🛑 All tracking stopped.")
 
 @bot.event
 async def on_ready():
-    print(f'🚀 {bot.user} is live!')
+    print(f'🚀 {bot.user} is live and synced!')
 
 bot.run(TOKEN)
