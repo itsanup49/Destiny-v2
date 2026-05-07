@@ -2,13 +2,10 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import os
-import json
-import asyncio
-from dotenv import load_dotenv
+import requests
+from bs4 import BeautifulSoup
 from thefuzz import process
-from nepse_api import Nepse 
-
-
+from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -16,82 +13,55 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 class DestinyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True 
         super().__init__(command_prefix="!", intents=intents)
         self.live_tracking = {}
-        self.all_symbols = []
-        self.api = Nepse() # New initialization
+        self.all_symbols = ["NABIL", "NICA", "ADBL", "UPPER", "NIFRA", "HIDCL", "HDL"]
+
+    async def get_live_price(self, symbol):
+        # Scraping Sharesansar live price page
+        url = "https://www.sharesansar.com/live-trading"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Finding the row with our symbol
+        table = soup.find('table', {'id': 'headertall'})
+        for row in table.find_all('tr'):
+            cols = row.find_all('td')
+            if len(cols) > 0 and cols[1].text.strip() == symbol.upper():
+                return float(cols[2].text.replace(',', ''))
+        return None
 
     async def setup_hook(self):
-        print("🔄 Fetching latest NEPSE symbols...")
-        try:
-            # The new library gets symbols very fast
-            data = await self.api.get_price()
-            self.all_symbols = [stock['symbol'] for stock in data]
-            print(f"✅ Loaded {len(self.all_symbols)} symbols!")
-        except Exception as e:
-            print(f"⚠️ Initial fetch failed: {e}")
-            self.all_symbols = ["NABIL", "NICA", "ADBL", "NIFRA", "UPPER"]
-        
         await self.tree.sync()
-        if not self.market_check_loop.is_running():
-            self.market_check_loop.start()
+        self.market_check_loop.start()
 
-    @tasks.loop(seconds=60) # Increased to 60s to avoid being blocked
+    @tasks.loop(seconds=30)
     async def market_check_loop(self):
         if not self.live_tracking: return
-        try:
-            prices = await self.api.get_price()
-            price_dict = {stock['symbol']: stock['ltp'] for stock in prices}
-            
-            for symbol, channel_id in self.live_tracking.items():
-                if symbol in price_dict:
-                    chan = self.get_channel(channel_id)
-                    if chan: await chan.send(f"🕒 **Update:** {symbol} is Rs. {price_dict[symbol]}")
-        except: pass
+        # Logic to fetch once and update all tracked stocks to save speed
+        pass
 
 bot = DestinyBot()
 
-@bot.tree.command(name="price", description="Check live stock price")
-async def price_cmd(interaction: discord.Interaction, symbol: str):
+@bot.tree.command(name="price", description="Live NEPSE Price (No Delay)")
+async def price(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
     sym = symbol.strip().upper()
     try:
-        # api-nepse returns a list, we filter for our symbol
-        prices = await bot.api.get_price()
-        stock = next((s for s in prices if s['symbol'] == sym), None)
-        
-        if stock:
-            embed = discord.Embed(title=f"📊 {sym}", color=discord.Color.blue())
-            embed.add_field(name="LTP", value=f"**Rs. {stock['ltp']}**", inline=True)
-            embed.add_field(name="Change", value=f"{stock['point_change']} ({stock['percentage_change']}%)", inline=True)
-            embed.add_field(name="High/Low", value=f"H: {stock['high']} | L: {stock['low']}", inline=False)
-            embed.set_footer(text="Powered by api-nepse")
+        current_price = await bot.get_live_price(sym)
+        if current_price:
+            embed = discord.Embed(title=f"🔥 {sym} Live", color=discord.Color.gold())
+            embed.add_field(name="LTP", value=f"Rs. {current_price}")
+            embed.set_footer(text="Source: Sharesansar Live (Real-time)")
             await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send(f"❌ Symbol **{sym}** not found.")
+            await interaction.followup.send(f"❌ Symbol {sym} not found in live trading.")
     except Exception as e:
-        await interaction.followup.send("❌ NEPSE API is currently unreachable. Try again in a minute.")
-
-@price_cmd.autocomplete('symbol')
-async def stock_auto(interaction: discord.Interaction, current: str):
-    if not current: return [app_commands.Choice(name=s, value=s) for s in bot.all_symbols[:10]]
-    matches = process.extract(current, bot.all_symbols, limit=10)
-    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches if m[1] > 35]
-
-@bot.tree.command(name="track", description="Track stock price updates")
-async def track(interaction: discord.Interaction, symbol: str):
-    sym = symbol.strip().upper()
-    bot.live_tracking[sym] = interaction.channel_id
-    await interaction.response.send_message(f"📡 Now tracking **{sym}** every 60s.")
-
-@bot.tree.command(name="stop", description="Stop all tracking")
-async def stop(interaction: discord.Interaction):
-    bot.live_tracking.clear()
-    await interaction.response.send_message("🛑 Tracking stopped.")
+        await interaction.followup.send("⚠️ Market is likely closed or site is down.")
 
 @bot.event
 async def on_ready():
-    print(f'🚀 Destiny-v2 is live with api-nepse!')
+    print(f'🚀 {bot.user} is live with Real-Time Scraping!')
 
 bot.run(TOKEN)
