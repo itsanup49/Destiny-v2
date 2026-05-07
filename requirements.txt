@@ -1,4 +1,5 @@
 discord.py
-api-nepse
+beautifulsoup4
+requests
 thefuzz
 python-dotenv
