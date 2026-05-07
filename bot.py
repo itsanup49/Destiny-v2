@@ -5,7 +5,10 @@ import os
 import json
 from dotenv import load_dotenv
 from thefuzz import process
-from nepse import SecurityClient
+try:
+    from nepse import SecurityClient
+except ImportError:
+    from nepse.core import SecurityClient
 
 
 
