@@ -5,7 +5,8 @@ import os
 import json
 from dotenv import load_dotenv
 from thefuzz import process
-from nepse import SecurityClient
+from nepse_api import SecurityClient
+
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
