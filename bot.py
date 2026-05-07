@@ -11,8 +11,8 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 #  CONFIG  –  edit these before running
 # ─────────────────────────────────────────────
-BOT_TOKEN      = "YOUR_DISCORD_BOT_TOKEN"   # from Discord Developer Portal
-ALERT_CHANNEL  = 123456789012345678         # right-click your channel → Copy ID
+BOT_TOKEN      = "MTUwMTk3NDM3MjA2NjI2NzM2Ng.G0gg-_.6ze3FuZNSWmqN4k1V7Yw3ftB1vPNRRTXbjNL6Q"   # from Discord Developer Portal
+ALERT_CHANNEL  = 1501975311506604124         # right-click your channel → Copy ID
 ALERTS_FILE    = "alerts.json"
 CHECK_INTERVAL = 1                          # minutes
 # ─────────────────────────────────────────────
