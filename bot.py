@@ -6,7 +6,8 @@ import json
 import asyncio
 from dotenv import load_dotenv
 from thefuzz import process
-from nepse import Nepse # Change nepse_api to just nepse
+from nepse_api import Nepse 
+
 
 
 load_dotenv()
