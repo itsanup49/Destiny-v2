@@ -5,20 +5,15 @@ import os
 import json
 from dotenv import load_dotenv
 from thefuzz import process
-try:
-    from nepse import MarketClient
-except ImportError:
-    from nepse.core import MarketClient
-
-# Initialize the Market Client instead
-nepse_client = MarketClient()
-
-
-
+from nepse import Client  # We use the main Client now
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
-nepse_client = SecurityClient()
+
+# This version automatically handles the 'client_wrapper' for you
+nepse = Client()
+nepse_client = nepse.security_client 
+
 
 class DestinyBot(commands.Bot):
     def __init__(self):
