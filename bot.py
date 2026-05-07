@@ -6,9 +6,13 @@ import json
 from dotenv import load_dotenv
 from thefuzz import process
 try:
-    from nepse import SecurityClient
+    from nepse import MarketClient
 except ImportError:
-    from nepse.core import SecurityClient
+    from nepse.core import MarketClient
+
+# Initialize the Market Client instead
+nepse_client = MarketClient()
+
 
 
 
