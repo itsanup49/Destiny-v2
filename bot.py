@@ -1,258 +1,117 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import aiohttp
-from bs4 import BeautifulSoup
-import json
 import os
-import asyncio
-from datetime import datetime
+import json
+from dotenv import load_dotenv
+from thefuzz import process
+from nepse import SecurityClient
 
-# ─────────────────────────────────────────────
-#  CONFIG  –  edit these before running
-# ─────────────────────────────────────────────
-BOT_TOKEN      = "MTUwMTk3NDM3MjA2NjI2NzM2Ng.G0gg-_.6ze3FuZNSWmqN4k1V7Yw3ftB1vPNRRTXbjNL6Q"   # from Discord Developer Portal
-ALERT_CHANNEL  = 1501975311506604124         # right-click your channel → Copy ID
-ALERTS_FILE    = "alerts.json"
-CHECK_INTERVAL = 1                          # minutes
-# ─────────────────────────────────────────────
+load_dotenv()
+TOKEN = os.getenv('DISCORD_TOKEN')
+nepse_client = SecurityClient()
 
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
+class DestinyBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        super().__init__(command_prefix="!", intents=intents)
+        self.price_alerts = self.load_data()
+        self.live_tracking = {}
+        self.all_symbols = []
 
+    def load_data(self):
+        if os.path.exists('data.json'):
+            try:
+                with open('data.json', 'r') as f:
+                    return json.load(f)
+            except: return {}
+        return {}
 
-# ── Helpers ───────────────────────────────────
+    def save_data(self):
+        with open('data.json', 'w') as f:
+            json.dump(self.price_alerts, f, indent=4)
 
-def load_alerts() -> dict:
-    if os.path.exists(ALERTS_FILE):
-        with open(ALERTS_FILE) as f:
-            return json.load(f)
-    return {}
+    async def setup_hook(self):
+        try:
+            securities = await nepse_client.get_securities()
+            self.all_symbols = [s.symbol for s in securities]
+            print(f"✅ Loaded {len(self.all_symbols)} NEPSE symbols!")
+        except Exception as e:
+            self.all_symbols = ["NABIL", "ADBL", "NICA", "NIFRA", "UPPER"]
+            print(f"⚠️ API Error: {e}. Using fallback symbols.")
 
+        await self.tree.sync()
+        self.market_check_loop.start()
 
-def save_alerts(data: dict):
-    with open(ALERTS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    @tasks.loop(seconds=30)
+    async def market_check_loop(self):
+        monitored = set(self.price_alerts.keys()) | set(self.live_tracking.keys())
+        if not monitored: return
 
+        for symbol in monitored:
+            try:
+                data = await nepse_client.get_security_details(symbol)
+                if not data: continue
+                price = float(data.last_traded_price)
 
-async def fetch_price(symbol: str) -> float | None:
-    """Scrape live price from Merolagani."""
-    url = f"https://merolagani.com/CompanyDetail.aspx?symbol={symbol.upper()}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    return None
-                html = await resp.text()
-        soup = BeautifulSoup(html, "html.parser")
+                if symbol in self.live_tracking:
+                    chan = self.get_channel(self.live_tracking[symbol])
+                    if chan: await chan.send(f"🕒 **Update:** {symbol} is Rs. {price}")
 
-        # Merolagani shows LTP in a span with this class
-        ltp_tag = soup.find("span", {"id": lambda x: x and "ctl00_ContentPlaceHolder1_LiveTrading1_lblLTP" in str(x)})
-        if not ltp_tag:
-            # fallback: look for the price inside table rows
-            for td in soup.find_all("td"):
-                if "LTP" in td.get_text():
-                    sibling = td.find_next_sibling("td")
-                    if sibling:
-                        val = sibling.get_text(strip=True).replace(",", "")
-                        return float(val)
-            return None
+                if symbol in self.price_alerts:
+                    a = self.price_alerts[symbol]
+                    if price >= a['max'] or price <= a['low']:
+                        chan = self.get_channel(a['channel'])
+                        status = "🚀 MAX" if price >= a['max'] else "📉 LOW"
+                        if chan: await chan.send(f"🔔 **{status} ALERT:** {symbol} hit {price}!")
+                        del self.price_alerts[symbol]
+                        self.save_data()
+            except: pass
 
-        val = ltp_tag.get_text(strip=True).replace(",", "")
-        return float(val) if val else None
-    except Exception:
-        return None
+bot = DestinyBot()
 
-
-def make_alert_embed(symbol: str, price: float, kind: str, threshold: float, user_id: int) -> discord.Embed:
-    color = discord.Color.red() if kind == "low" else discord.Color.green()
-    arrow = "🔴 DROPPED BELOW" if kind == "low" else "🟢 ROSE ABOVE"
-    embed = discord.Embed(
-        title=f"📊 NEPSE Alert – {symbol}",
-        description=f"**{symbol}** {arrow} your threshold!",
-        color=color,
-        timestamp=datetime.utcnow()
-    )
-    embed.add_field(name="Current Price", value=f"Rs. {price:,.2f}", inline=True)
-    embed.add_field(name="Your Threshold", value=f"Rs. {threshold:,.2f}", inline=True)
-    embed.add_field(name="Alert Type", value=kind.upper(), inline=True)
-    embed.set_footer(text=f"User: <@{user_id}> • NEPSE Bot")
-    return embed
-
-
-# ── Background Task ───────────────────────────
-
-@tasks.loop(minutes=CHECK_INTERVAL)
-async def check_prices():
-    alerts = load_alerts()
-    if not alerts:
-        return
-
-    channel = bot.get_channel(ALERT_CHANNEL)
-    if not channel:
-        print(f"[ERROR] Channel {ALERT_CHANNEL} not found.")
-        return
-
-    triggered_keys = []
-
-    for key, info in alerts.items():
-        symbol   = info["symbol"]
-        high     = info.get("high")
-        low      = info.get("low")
-        user_id  = info["user_id"]
-
-        price = await fetch_price(symbol)
-        if price is None:
-            print(f"[WARN] Could not fetch price for {symbol}")
-            continue
-
-        print(f"[INFO] {symbol} = Rs.{price}")
-
-        if high is not None and price >= high:
-            embed = make_alert_embed(symbol, price, "high", high, user_id)
-            await channel.send(content=f"<@{user_id}>", embed=embed)
-            triggered_keys.append(key)
-
-        elif low is not None and price <= low:
-            embed = make_alert_embed(symbol, price, "low", low, user_id)
-            await channel.send(content=f"<@{user_id}>", embed=embed)
-            triggered_keys.append(key)
-
-    # Remove triggered alerts so they don't spam
-    for k in triggered_keys:
-        alerts.pop(k, None)
-    if triggered_keys:
-        save_alerts(alerts)
-
-
-@check_prices.before_loop
-async def before_check():
-    await bot.wait_until_ready()
-
-
-# ── Slash Commands ────────────────────────────
-
-@tree.command(name="watch", description="Set a price alert for a NEPSE stock")
-@app_commands.describe(
-    symbol="Stock symbol (e.g. NABIL, NTC, UPPER)",
-    high="Alert when price goes ABOVE this value (optional)",
-    low="Alert when price goes BELOW this value (optional)"
-)
-async def watch(interaction: discord.Interaction, symbol: str, high: float = None, low: float = None):
-    if high is None and low is None:
-        await interaction.response.send_message("❌ Please provide at least a `high` or `low` value.", ephemeral=True)
-        return
-
-    symbol = symbol.upper()
-    await interaction.response.defer(ephemeral=True)
-
-    price = await fetch_price(symbol)
-    if price is None:
-        await interaction.followup.send(f"❌ Could not find **{symbol}** on Merolagani. Check the symbol and try again.", ephemeral=True)
-        return
-
-    alerts = load_alerts()
-    key = f"{interaction.user.id}_{symbol}"
-    alerts[key] = {
-        "symbol":  symbol,
-        "high":    high,
-        "low":     low,
-        "user_id": interaction.user.id,
-        "set_at":  datetime.utcnow().isoformat()
-    }
-    save_alerts(alerts)
-
-    parts = []
-    if high: parts.append(f"🟢 High: Rs. {high:,.2f}")
-    if low:  parts.append(f"🔴 Low:  Rs. {low:,.2f}")
-
-    embed = discord.Embed(
-        title=f"✅ Alert Set – {symbol}",
-        description="\n".join(parts),
-        color=discord.Color.blurple()
-    )
-    embed.add_field(name="Current Price", value=f"Rs. {price:,.2f}")
-    embed.set_footer(text="I'll ping you in the alert channel when triggered!")
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-
-@tree.command(name="price", description="Check the current price of a NEPSE stock")
-@app_commands.describe(symbol="Stock symbol (e.g. NABIL, NTC, UPPER)")
+@bot.tree.command(name="price", description="Check live stock price with search UI")
 async def price_cmd(interaction: discord.Interaction, symbol: str):
-    symbol = symbol.upper()
     await interaction.response.defer()
-    price = await fetch_price(symbol)
-    if price is None:
-        await interaction.followup.send(f"❌ Could not fetch price for **{symbol}**.")
-        return
-    embed = discord.Embed(
-        title=f"📈 {symbol} – Current Price",
-        description=f"**Rs. {price:,.2f}**",
-        color=discord.Color.gold(),
-        timestamp=datetime.utcnow()
-    )
-    embed.set_footer(text="Source: Merolagani")
-    await interaction.followup.send(embed=embed)
-
-
-@tree.command(name="list", description="List all your active price alerts")
-async def list_alerts(interaction: discord.Interaction):
-    alerts = load_alerts()
-    user_alerts = {k: v for k, v in alerts.items() if v["user_id"] == interaction.user.id}
-
-    if not user_alerts:
-        await interaction.response.send_message("📭 You have no active alerts.", ephemeral=True)
-        return
-
-    embed = discord.Embed(title="🔔 Your Active Alerts", color=discord.Color.blurple())
-    for info in user_alerts.values():
-        val = []
-        if info.get("high"): val.append(f"High ↑ Rs. {info['high']:,.2f}")
-        if info.get("low"):  val.append(f"Low ↓ Rs. {info['low']:,.2f}")
-        embed.add_field(name=info["symbol"], value="\n".join(val), inline=True)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@tree.command(name="remove", description="Remove a price alert for a stock")
-@app_commands.describe(symbol="Stock symbol to remove alert for")
-async def remove_alert(interaction: discord.Interaction, symbol: str):
-    symbol = symbol.upper()
-    alerts = load_alerts()
-    key = f"{interaction.user.id}_{symbol}"
-    if key in alerts:
-        del alerts[key]
-        save_alerts(alerts)
-        await interaction.response.send_message(f"🗑️ Alert for **{symbol}** removed.", ephemeral=True)
+    data = await nepse_client.get_security_details(symbol.upper())
+    if data:
+        embed = discord.Embed(title=f"📊 {symbol.upper()}", color=discord.Color.blue())
+        embed.add_field(name="LTP", value=f"Rs. {data.last_traded_price}")
+        embed.set_footer(text="Destiny-v2 • NEPSE Live")
+        await interaction.followup.send(embed=embed)
     else:
-        await interaction.response.send_message(f"❌ No alert found for **{symbol}**.", ephemeral=True)
+        await interaction.followup.send("❌ Symbol not found.")
 
+@price_cmd.autocomplete('symbol')
+async def stock_auto(interaction: discord.Interaction, current: str):
+    if not current:
+        return [app_commands.Choice(name=s, value=s) for s in bot.all_symbols[:10]]
+    matches = process.extract(current, bot.all_symbols, limit=10)
+    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches if m[1] > 30]
 
-@tree.command(name="removeall", description="Remove ALL your active alerts")
-async def remove_all(interaction: discord.Interaction):
-    alerts = load_alerts()
-    before = len(alerts)
-    alerts = {k: v for k, v in alerts.items() if v["user_id"] != interaction.user.id}
-    removed = before - len(alerts)
-    save_alerts(alerts)
-    await interaction.response.send_message(f"🗑️ Removed **{removed}** alert(s).", ephemeral=True)
+@bot.tree.command(name="set_alert", description="Ping me when price hits X high or Y low")
+async def set_alert(interaction: discord.Interaction, symbol: str, max_price: float, low_price: float):
+    symbol = symbol.upper()
+    bot.price_alerts[symbol] = {
+        "user_id": interaction.user.id, "max": max_price, "low": low_price, "channel": interaction.channel_id
+    }
+    bot.save_data()
+    await interaction.response.send_message(f"✅ Alert saved for **{symbol}**.")
 
+@bot.tree.command(name="track", description="Get price updates every 30s in this channel")
+async def track(interaction: discord.Interaction, symbol: str):
+    bot.live_tracking[symbol.upper()] = interaction.channel_id
+    await interaction.response.send_message(f"📡 Now tracking **{symbol.upper()}** every 30s.")
 
-# ── Bot Events ────────────────────────────────
+@bot.tree.command(name="stop", description="Stop all alerts and 30s tracking")
+async def stop(interaction: discord.Interaction):
+    bot.live_tracking.clear()
+    bot.price_alerts.clear()
+    bot.save_data()
+    await interaction.response.send_message("🛑 Cleared all active tasks.")
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} ({bot.user.id})")
-    try:
-        synced = await tree.sync()
-        print(f"✅ Synced {len(synced)} slash command(s)")
-    except Exception as e:
-        print(f"[ERROR] Sync failed: {e}")
-    check_prices.start()
-    print(f"✅ Price checker started – every {CHECK_INTERVAL} min")
+    print(f'🚀 {bot.user} is live on Railway!')
 
-
-bot.run(BOT_TOKEN)
+bot.run(TOKEN)
