@@ -6,7 +6,8 @@ import json
 import asyncio
 from dotenv import load_dotenv
 from thefuzz import process
-from nepse_api import Nepse # This is the new library import
+from nepse import Nepse # Change nepse_api to just nepse
+
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
