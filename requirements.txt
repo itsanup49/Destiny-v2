@@ -1,4 +1,4 @@
 discord.py
+api-nepse
 thefuzz
-requests
 python-dotenv
