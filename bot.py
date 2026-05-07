@@ -9,23 +9,16 @@ from thefuzz import process
 from nepse import Client
 
 load_dotenv()
-# The bot will now tell you exactly what is wrong if it can't find the token
 TOKEN = os.getenv('DISCORD_TOKEN')
-
-if not TOKEN:
-    print("❌ ERROR: 'DISCORD_TOKEN' is missing in Railway Variables!")
-    exit()
 
 class DestinyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        # Enable message content if you ever want to use ! commands
         intents.message_content = True 
         super().__init__(command_prefix="!", intents=intents)
         self.price_alerts = self.load_data()
         self.live_tracking = {}
         self.all_symbols = []
-        # verify_ssl=False is needed because NEPSE's servers often have SSL issues
         self.nepse = Client()
 
     def load_data(self):
@@ -41,7 +34,6 @@ class DestinyBot(commands.Bot):
 
     async def setup_hook(self):
         try:
-            # Refresh symbols on start
             securities = await self.nepse.security_client.get_securities()
             self.all_symbols = [s.symbol for s in securities]
             print(f"✅ Loaded {len(self.all_symbols)} NEPSE symbols!")
@@ -49,9 +41,8 @@ class DestinyBot(commands.Bot):
             print(f"⚠️ API Fetch Error: {e}")
             self.all_symbols = ["NABIL", "ADBL", "NICA", "NIFRA", "UPPER"]
         
+        # Syncing globally (can take 1 hour)
         await self.tree.sync()
-        if not self.market_check_loop.is_running():
-            self.market_check_loop.start()
 
     @tasks.loop(seconds=30)
     async def market_check_loop(self):
@@ -75,28 +66,52 @@ class DestinyBot(commands.Bot):
 
 bot = DestinyBot()
 
+# --- COMMANDS ---
+
 @bot.tree.command(name="price", description="Check live stock price")
 async def price_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
+    clean_symbol = symbol.strip().upper()
     try:
-        data = await bot.nepse.security_client.get_company(symbol=symbol.upper())
-        embed = discord.Embed(title=f"📊 {symbol.upper()}", color=discord.Color.blue())
-        embed.add_field(name="LTP", value=f"Rs. {data.last_traded_price}")
+        data = await bot.nepse.security_client.get_company(symbol=clean_symbol)
+        embed = discord.Embed(title=f"📊 {clean_symbol}", color=discord.Color.blue())
+        embed.add_field(name="LTP", value=f"Rs. {data.last_traded_price}", inline=False)
+        embed.set_footer(text="Destiny-v2 • NEPSE Live")
         await interaction.followup.send(embed=embed)
-    except:
-        await interaction.followup.send("❌ Symbol not found or API down.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Could not find '{clean_symbol}'. Make sure it's a valid symbol.")
 
 @price_cmd.autocomplete('symbol')
 async def stock_auto(interaction: discord.Interaction, current: str):
     if not current:
         return [app_commands.Choice(name=s, value=s) for s in bot.all_symbols[:10]]
     matches = process.extract(current, bot.all_symbols, limit=10)
-    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches if m[1] > 30]
+    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches if m[1] > 40]
 
-# Add other commands (/track, /set_alert, /stop) here exactly like price_cmd
+@bot.tree.command(name="track", description="Get price updates every 30 seconds")
+async def track(interaction: discord.Interaction, symbol: str):
+    sym = symbol.strip().upper()
+    bot.live_tracking[sym] = interaction.channel_id
+    if not bot.market_check_loop.is_running():
+        bot.market_check_loop.start()
+    await interaction.response.send_message(f"📡 Now tracking **{sym}** every 30s in this channel.")
+
+@bot.tree.command(name="stop", description="Stop all tracking and alerts")
+async def stop(interaction: discord.Interaction):
+    bot.live_tracking.clear()
+    bot.price_alerts.clear()
+    bot.save_data()
+    await interaction.response.send_message("🛑 All active tracking and alerts have been cleared.")
+
+# --- ADMIN COMMAND (Instant Sync) ---
+@bot.command()
+@commands.is_owner()
+async def sync(ctx):
+    await bot.tree.sync()
+    await ctx.send("✅ Commands forced to sync globally! Wait 5 mins.")
 
 @bot.event
 async def on_ready():
-    print(f'🚀 {bot.user} is live and ready!')
+    print(f'🚀 {bot.user} is live!')
 
 bot.run(TOKEN)
