@@ -9,7 +9,13 @@ def fetch_all_symbols():
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         table = soup.find('table')
-        symbols = [row.find_all('td')[1].text.strip() for row in table.find_all('tr')[1:] if len(row.find_all('td')) > 1]
+        symbols = []
+        if table:
+            for row in table.find_all('tr')[1:]:
+                cols = row.find_all('td')
+                if len(cols) > 1:
+                    sym = cols[1].text.strip()
+                    if sym: symbols.append(sym)
         return sorted(list(set(symbols)))
     except:
         return ["NABIL", "NICA", "HDL"]
