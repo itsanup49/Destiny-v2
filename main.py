@@ -12,21 +12,23 @@ class DestinyBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Automatically load all files in the /cogs folder
+        # Automatically loads everything in the cogs folder
         for filename in os.listdir('./cogs'):
             if filename.endswith('.py'):
-                try:
-                    await self.load_extension(f'cogs.{filename[:-3]}')
-                    print(f'✅ Loaded Cog: {filename}')
-                except Exception as e:
-                    print(f'❌ Failed to load {filename}: {e}')
+                await self.load_extension(f'cogs.{filename[:-3]}')
         await self.tree.sync()
 
 bot = DestinyBot()
 
+@bot.command()
+@commands.is_owner()
+async def sync(ctx):
+    """Run !sync in Discord to update /commands list"""
+    await bot.tree.sync()
+    await ctx.send("✅ Destiny V2 commands synced to Discord servers!")
+
 @bot.event
 async def on_ready():
-    print(f'🚀 {bot.user.name} is online and deployed!')
+    print(f'🚀 {bot.user.name} Deployed. Use !sync to refresh slash commands.')
 
 bot.run(os.getenv('DISCORD_TOKEN'))
-
