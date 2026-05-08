@@ -1,4 +1,6 @@
 discord.py
 git+https://github.com/basic-bgnr/NepseUnofficialApi.git
+requests
+beautifulsoup4
 thefuzz
 python-dotenv
