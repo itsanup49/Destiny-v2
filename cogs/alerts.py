@@ -7,73 +7,84 @@ from bs4 import BeautifulSoup
 class Alerts(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Format: {user_id: {"symbol": "NICA", "target": 800, "type": "above"}}
         self.active_alerts = {} 
-        self.check_alerts.start() # Start the background engine
+        self.check_alerts.start()
 
     def cog_unload(self):
         self.check_alerts.cancel()
 
     def get_price(self, symbol):
+        """Uses the 24/7 data scraper for alerts"""
         try:
-            url = "https://www.sharesansar.com/live-trading"
-            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+            url = "https://www.sharesansar.com/today-price"
+            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
             soup = BeautifulSoup(res.text, 'html.parser')
-            table = soup.find('table', {'id': 'headertall'})
+            table = soup.find('table')
             if table:
                 for row in table.find_all('tr')[1:]:
                     cols = row.find_all('td')
-                    if len(cols) > 2 and cols[1].text.strip() == symbol:
-                        return float(cols[2].text.strip().replace(',', ''))
+                    if len(cols) > 10 and cols[1].text.strip() == symbol:
+                        return float(cols[6].text.strip().replace(',', ''))
             return None
         except: return None
 
-    @tasks.loop(minutes=2)
+    @tasks.loop(minutes=3)
     async def check_alerts(self):
-        """Background loop that checks prices every 2 minutes."""
-        if not self.active_alerts:
-            return
+        if not self.active_alerts: return
 
-        for user_id, data in list(self.active_alerts.items()):
-            current_price = self.get_price(data['symbol'])
-            
-            if current_price:
-                target = data['target']
-                symbol = data['symbol']
+        for user_id, alerts in list(self.active_alerts.items()):
+            for data in alerts[:]: # Iterate over a copy
+                current_price = self.get_price(data['symbol'])
                 
-                # Check if target hit
-                if (data['type'] == "above" and current_price >= target) or \
-                   (data['type'] == "below" and current_price <= target):
+                if current_price:
+                    triggered = False
+                    reason = ""
                     
-                    user = await self.bot.fetch_user(user_id)
-                    if user:
-                        embed = discord.Embed(title="🚨 DESTINY PRICE ALERT", color=0xF1C40F)
-                        embed.add_field(name="Symbol", value=symbol, inline=True)
-                        embed.add_field(name="Target Hit", value=f"Rs. {current_price}", inline=True)
-                        embed.set_footer(text="Destiny Analytics • Alert System")
+                    # Check Upper Limit
+                    if data['upper'] and current_price >= data['upper']:
+                        triggered = True
+                        reason = f"🚀 Went ABOVE Rs. {data['upper']}"
+                    
+                    # Check Lower Limit
+                    elif data['lower'] and current_price <= data['lower']:
+                        triggered = True
+                        reason = f"📉 Dropped BELOW Rs. {data['lower']}"
                         
-                        await user.send(embed=embed)
-                        # Remove alert after firing to save memory
-                        del self.active_alerts[user_id]
+                    if triggered:
+                        user = await self.bot.fetch_user(user_id)
+                        if user:
+                            embed = discord.Embed(title="🚨 DESTINY PRICE ALERT", color=0xF1C40F)
+                            embed.add_field(name="Symbol", value=f"**{data['symbol']}**", inline=True)
+                            embed.add_field(name="Current Price", value=f"**Rs. {current_price}**", inline=True)
+                            embed.add_field(name="Trigger", value=reason, inline=False)
+                            await user.send(embed=embed)
+                        
+                        # Remove the specific alert after firing
+                        self.active_alerts[user_id].remove(data)
 
-    @app_commands.command(name="setalert", description="Get a DM when a stock hits your price")
-    async def setalert(self, interaction: discord.Interaction, symbol: str, price: float, direction: str):
-        """direction: type 'above' or 'below'"""
+    @app_commands.command(name="alert", description="Set upper and/or lower price limits")
+    async def alert(self, interaction: discord.Interaction, symbol: str, upper_limit: float = None, lower_limit: float = None):
         await interaction.response.defer(ephemeral=True)
         
         sym = symbol.upper()
-        dir_type = direction.lower()
         
-        if dir_type not in ["above", "below"]:
-            return await interaction.followup.send("❌ Use 'above' or 'below' for direction.")
+        if upper_limit is None and lower_limit is None:
+            return await interaction.followup.send("❌ You must provide at least an `upper_limit` or a `lower_limit`.")
 
-        self.active_alerts[interaction.user.id] = {
+        if interaction.user.id not in self.active_alerts:
+            self.active_alerts[interaction.user.id] = []
+            
+        self.active_alerts[interaction.user.id].append({
             "symbol": sym,
-            "target": price,
-            "type": dir_type
-        }
+            "upper": upper_limit,
+            "lower": lower_limit
+        })
         
-        await interaction.followup.send(f"✅ Alert set! I'll DM you when **{sym}** goes **{dir_type}** Rs. {price}.")
+        msg = f"✅ Alert set for **{sym}**!\n"
+        if upper_limit: msg += f"📈 Will DM if price hits **Rs. {upper_limit}** or higher.\n"
+        if lower_limit: msg += f"📉 Will DM if price drops to **Rs. {lower_limit}** or lower."
+        
+        await interaction.followup.send(msg)
 
 async def setup(bot):
     await bot.add_cog(Alerts(bot))
