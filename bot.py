@@ -2,8 +2,8 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import os
-import requests
-from bs4 import BeautifulSoup
+import asyncio
+from nepse import AsyncNepse # Correct import for basic-bgnr library
 from thefuzz import process
 from dotenv import load_dotenv
 
@@ -14,54 +14,57 @@ class DestinyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
-        self.live_tracking = {}
-        self.all_symbols = ["NABIL", "NICA", "ADBL", "UPPER", "NIFRA", "HIDCL", "HDL"]
-
-    async def get_live_price(self, symbol):
-        # Scraping Sharesansar live price page
-        url = "https://www.sharesansar.com/live-trading"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Finding the row with our symbol
-        table = soup.find('table', {'id': 'headertall'})
-        for row in table.find_all('tr'):
-            cols = row.find_all('td')
-            if len(cols) > 0 and cols[1].text.strip() == symbol.upper():
-                return float(cols[2].text.replace(',', ''))
-        return None
+        self.nepse = AsyncNepse()
+        self.nepse.setTLSVerification(False) # Needed due to NEPSE's SSL issues
+        self.all_symbols = []
 
     async def setup_hook(self):
+        print("🔄 Loading symbols from Unofficial API...")
+        try:
+            # This fetches the list which usually contains the latest LTP
+            data = await self.nepse.getCompanyList()
+            self.all_symbols = [stock['symbol'] for stock in data]
+            print(f"✅ Loaded {len(self.all_symbols)} symbols!")
+        except Exception as e:
+            print(f"⚠️ Fetch failed: {e}")
+            self.all_symbols = ["NABIL", "NICA", "ADBL", "NIFRA", "UPPER"]
+        
         await self.tree.sync()
-        self.market_check_loop.start()
-
-    @tasks.loop(seconds=30)
-    async def market_check_loop(self):
-        if not self.live_tracking: return
-        # Logic to fetch once and update all tracked stocks to save speed
-        pass
 
 bot = DestinyBot()
 
-@bot.tree.command(name="price", description="Live NEPSE Price (No Delay)")
+@bot.tree.command(name="price", description="Check LTP using Unofficial API")
 async def price(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
     sym = symbol.strip().upper()
+    
     try:
-        current_price = await bot.get_live_price(sym)
-        if current_price:
-            embed = discord.Embed(title=f"🔥 {sym} Live", color=discord.Color.gold())
-            embed.add_field(name="LTP", value=f"Rs. {current_price}")
-            embed.set_footer(text="Source: Sharesansar Live (Real-time)")
+        # We fetch the full list to get the most recent LTP even if market is closed
+        data = await bot.nepse.getCompanyList()
+        stock = next((s for s in data if s['symbol'] == sym), None)
+        
+        if stock:
+            # The keys in this API are usually 'lastTradedPrice' or similar
+            ltp = stock.get('lastTradedPrice', 'N/A')
+            change = stock.get('change', '0.0')
+            
+            embed = discord.Embed(title=f"📊 {sym} (Last Traded)", color=discord.Color.blue())
+            embed.add_field(name="LTP", value=f"Rs. {ltp}", inline=True)
+            embed.add_field(name="Symbol", value=stock.get('symbol'), inline=True)
+            embed.set_footer(text="Data: NepseUnofficialApi")
             await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send(f"❌ Symbol {sym} not found in live trading.")
+            await interaction.followup.send(f"❌ Symbol {sym} not found in current list.")
     except Exception as e:
-        await interaction.followup.send("⚠️ Market is likely closed or site is down.")
+        await interaction.followup.send("⚠️ API Error: Unable to fetch data. NEPSE might be blocking requests.")
+
+@price.autocomplete('symbol')
+async def stock_auto(interaction: discord.Interaction, current: str):
+    matches = process.extract(current, bot.all_symbols, limit=5)
+    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches]
 
 @bot.event
 async def on_ready():
-    print(f'🚀 {bot.user} is live with Real-Time Scraping!')
+    print(f'🚀 {bot.user} is using the Unofficial NEPSE API!')
 
 bot.run(TOKEN)
