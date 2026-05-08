@@ -20,7 +20,7 @@ class DestinyBot(commands.Bot):
         self.active_alerts = {} 
 
     def fetch_nepse_table(self):
-        """Scrapes the live market table."""
+        """Scrapes the live market table for Price and Volume."""
         try:
             url = "https://www.sharesansar.com/live-trading"
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -43,25 +43,26 @@ class DestinyBot(commands.Bot):
         except: return {}
 
     def fetch_top_brokers(self):
-        """Scrapes the Top Brokers page for today's highest buyers."""
+        """Scrapes Top Brokers and ranks them 1, 2, 3 by Buying Volume/Amount."""
         try:
             url = "https://www.sharesansar.com/top-brokers"
             headers = {'User-Agent': 'Mozilla/5.0'}
             response = requests.get(url, headers=headers, timeout=10)
             soup = BeautifulSoup(response.text, 'html.parser')
             table = soup.find('table')
-            brokers = []
+            broker_list = []
             if table:
                 rows = table.find_all('tr')
-                for row in rows[1:4]: # Top 3 only
+                # Grab Top 3 rows
+                for i, row in enumerate(rows[1:4], 1):
                     cols = row.find_all('td')
                     if len(cols) > 3:
-                        name = cols[2].text.strip().replace('Co. Ltd.', '').replace('Pvt. Limited', '')
-                        buy_amt = cols[3].text.strip()
-                        brokers.append(f"**{len(brokers)+1}.** {name[:15]}... (Rs. {buy_amt})")
-            return "\n".join(brokers) if brokers else "No broker data yet today."
+                        name = cols[2].text.strip().split(' ')[0] # Shorter name
+                        buy_vol = cols[3].text.strip()
+                        broker_list.append(f"**{i}: {name}** — {buy_vol}")
+            return "\n".join(broker_list) if broker_list else "Waiting for market activity..."
         except:
-            return "Broker data currently unavailable."
+            return "Broker data temporarily offline."
 
     async def setup_hook(self):
         data = self.fetch_nepse_table()
@@ -79,15 +80,18 @@ class DestinyBot(commands.Bot):
                 try:
                     price = float(live_data[sym]['ltp'])
                     if price <= config['low'] or price >= config['high']:
-                        # Simplified alert ping
                         channel = self.get_channel(config['channel'])
-                        if channel: await channel.send(f"🚨 <@{user_id}> {sym} hit Target: {price}")
+                        if channel:
+                            count = 7 if price >= config['high'] else 5
+                            for _ in range(count):
+                                await channel.send(f"🚨 <@{user_id}> **{sym}** TARGET HIT: **Rs. {price}**")
+                                await asyncio.sleep(3)
                         del self.active_alerts[user_id]
                 except: continue
 
 bot = DestinyBot()
 
-@bot.tree.command(name="price", description="Check LTP and Top 3 Buying Brokers")
+@bot.tree.command(name="price", description="LTP, Volume, Pressure & Top Brokers")
 async def price(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
     sym = symbol.strip().upper()
@@ -95,19 +99,24 @@ async def price(interaction: discord.Interaction, symbol: str):
     
     if sym in data:
         stock = data[sym]
-        broker_text = bot.fetch_top_brokers() # Get broker ranking
+        broker_ranking = bot.fetch_top_brokers()
         
-        color = 0x2ecc71 if "+" in stock['change'] else 0xe74c3c if "-" in stock['change'] else 0x34495e
-        embed = discord.Embed(title=f"📊 {sym} Analysis", color=color)
-        embed.add_field(name="Current Price", value=f"**Rs. {stock['ltp']}**", inline=True)
-        embed.add_field(name="Change", value=stock['change'], inline=True)
-        embed.add_field(name="🏆 Top Buyers (Market-wide)", value=broker_text, inline=False)
-        embed.set_footer(text="Broker data reflects total market buying today.")
+        # Calculate Pressure
+        change_f = float(stock['change'].replace('+', ''))
+        pressure = "🟢 Buying Pressure" if change_f > 0 else "🔴 Selling Pressure" if change_f < 0 else "⚖️ Neutral"
+        color = 0x2ecc71 if change_f > 0 else 0xe74c3c if change_f < 0 else 0x34495e
+        
+        embed = discord.Embed(title=f"📊 {sym} Market Report", color=color)
+        embed.add_field(name="Current Price", value=f"**Rs. {stock['ltp']}** ({stock['change']})", inline=True)
+        embed.add_field(name="Volume", value=f"{stock['vol']} units", inline=True)
+        embed.add_field(name="Market Pressure", value=f"**{pressure}**", inline=False)
+        embed.add_field(name="🏆 Top 3 Buying Brokers (Today)", value=broker_ranking, inline=False)
+        embed.set_footer(text="Data: Sharesansar Live Feed • 2026")
         await interaction.followup.send(embed=embed)
     else:
-        await interaction.followup.send(f"❌ Market closed or symbol **{sym}** not found.")
+        await interaction.followup.send(f"❌ Market closed or symbol **{sym}** not found. Check back at 10:30 AM NST.")
 
-@bot.tree.command(name="sync_symbols")
+@bot.tree.command(name="sync_symbols", description="Refresh the search list")
 async def sync_symbols(interaction: discord.Interaction):
     await interaction.response.defer()
     data = bot.fetch_nepse_table()
