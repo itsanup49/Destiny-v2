@@ -1,8 +1,5 @@
 discord.py
-requests
+python-dotenv
+aiohttp
 beautifulsoup4
 matplotlib
-pandas
-python-dotenv
-pytz
-aiohttp
