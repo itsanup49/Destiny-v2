@@ -1,6 +1,7 @@
 discord.py
-git+https://github.com/basic-bgnr/NepseUnofficialApi.git
 requests
 beautifulsoup4
 thefuzz
 python-dotenv
+httpx
+git+https://github.com/surajrimal07/NepseAPI-Unofficial.git
