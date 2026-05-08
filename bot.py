@@ -18,27 +18,31 @@ class DestinyBot(commands.Bot):
         self.nepse = AsyncNepse()
         self.nepse.setTLSVerification(False)
         self.all_symbols = []
-        # Store alerts: {USER_ID: {"symbol": SYM, "low": FLOAT, "high": FLOAT, "channel": ID}}
+        # Stores alert config: {USER_ID: {"symbol": SYM, "low": FLOAT, "high": FLOAT, "channel": ID}}
         self.active_alerts = {} 
 
     async def setup_hook(self):
+        print("🔄 Loading NEPSE symbols...")
         try:
             data = await self.nepse.getCompanyList()
             self.all_symbols = sorted([stock['symbol'] for stock in data])
+            print(f"✅ Loaded {len(self.all_symbols)} symbols!")
         except:
-            self.all_symbols = ["NABIL", "NICA", "ADBL"]
+            self.all_symbols = ["NABIL", "NICA", "ADBL", "HIDCL"]
+        
         await self.tree.sync()
-        self.alert_engine.start()
+        if not self.alert_engine.is_running():
+            self.alert_engine.start()
 
     async def fire_pings(self, user_id, channel_id, message, count):
-        """Sends a burst of pings every 3 seconds"""
+        """Sends the burst pings (3s intervals)"""
         channel = self.get_channel(channel_id)
         if not channel: return
         for _ in range(count):
             await channel.send(f"⚠️ <@{user_id}> {message}")
             await asyncio.sleep(3)
 
-    @tasks.loop(seconds=10) # Checks the market every 10s
+    @tasks.loop(seconds=15) # Market check frequency
     async def alert_engine(self):
         if not self.active_alerts: return
         try:
@@ -51,23 +55,61 @@ class DestinyBot(commands.Bot):
                 if sym in live_map:
                     current_p = live_map[sym]
                     
-                    # 🔴 LOWER LIMIT HIT (Below)
+                    # 🔴 PRICE BELOW LIMIT
                     if current_p <= config['low']:
                         msg = f"PRICE DROPPED! {sym} is at Rs. {current_p} (Target: {config['low']})"
-                        del self.active_alerts[user_id] # Stop alert after firing
+                        del self.active_alerts[user_id] 
                         await self.fire_pings(user_id, config['channel'], msg, 5)
                     
-                    # 🟢 UPPER LIMIT HIT (High)
+                    # 🟢 PRICE ABOVE LIMIT
                     elif current_p >= config['high']:
-                        msg = f"PRICE BREAKOUT! {sym} is at Rs. {current_p} (Target: {config['high']})"
-                        del self.active_alerts[user_id] # Stop alert after firing
+                        msg = f"BREAKOUT! {sym} is at Rs. {current_p} (Target: {config['high']})"
+                        del self.active_alerts[user_id]
                         await self.fire_pings(user_id, config['channel'], msg, 7)
-        except:
-            pass
+        except Exception as e:
+            print(f"Alert Engine Error: {e}")
 
 bot = DestinyBot()
 
-@bot.tree.command(name="set_alert", description="Set high/low targets for pings")
+@bot.tree.command(name="price", description="Check live LTP and market pressure")
+async def price_cmd(interaction: discord.Interaction, symbol: str):
+    await interaction.response.defer()
+    sym = symbol.strip().upper()
+    try:
+        # Check live first, then fallback to company list for closed market LTP
+        data = await bot.nepse.getLiveMarket()
+        stock = next((s for s in data if s['symbol'] == sym), None)
+        status_label = "LIVE"
+        
+        if not stock:
+            list_data = await bot.nepse.getCompanyList()
+            stock = next((s for s in list_data if s['symbol'] == sym), None)
+            status_label = "CLOSED"
+
+        if stock:
+            ltp = stock.get('lastTradedPrice') or stock.get('ltp') or 0
+            change = stock.get('pointChange', 0)
+            vol = stock.get('totalTradedQuantity') or stock.get('volume') or 0
+            
+            # Fetch Depth for Pressure
+            depth = await bot.nepse.getMarketDepth(sym)
+            buy = depth.get('totalBuyQuantity', 0)
+            sell = depth.get('totalSellQuantity', 0)
+            pressure = "🟢 Buying" if buy > sell else "🔴 Selling" if sell > buy else "⚖️ Neutral"
+
+            embed = discord.Embed(title=f"📊 {sym} Analysis", color=0x2f3136)
+            embed.add_field(name="Current Price", value=f"**Rs. {ltp}**", inline=True)
+            embed.add_field(name="Change", value=str(change), inline=True)
+            embed.add_field(name="Volume", value=f"{vol:,}", inline=False)
+            embed.add_field(name="Pressure", value=f"{pressure} (B: {buy:,} / S: {sell:,})", inline=False)
+            embed.set_footer(text=f"Market Status: {status_label}")
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.followup.send(f"❌ Could not find data for {sym}.")
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ API Error: {e}")
+
+@bot.tree.command(name="set_alert", description="Set targets for burst pings")
 async def set_alert(interaction: discord.Interaction, symbol: str, low: float, high: float):
     sym = symbol.strip().upper()
     bot.active_alerts[interaction.user.id] = {
@@ -77,34 +119,26 @@ async def set_alert(interaction: discord.Interaction, symbol: str, low: float, h
         "channel": interaction.channel_id
     }
     await interaction.response.send_message(
-        f"🎯 **Alert Configured for {sym}**\n"
-        f"📉 Below {low}: 5 Pings\n"
-        f"📈 Above {high}: 7 Pings\n"
-        "I'll watch the market for you!"
+        f"🎯 **Alert Armed for {sym}**\n"
+        f"📉 Below {low}: 5 pings\n"
+        f"📈 Above {high}: 7 pings\n"
+        "Tracking starts now!"
     )
 
-@bot.tree.command(name="price", description="Check live stock data")
-async def price_cmd(interaction: discord.Interaction, symbol: str):
-    await interaction.response.defer()
-    sym = symbol.strip().upper()
-    try:
-        data = await bot.nepse.getLiveMarket()
-        stock = next((s for s in data if s['symbol'] == sym), None)
-        if stock:
-            ltp = stock.get('lastTradedPrice', 0)
-            change = stock.get('pointChange', 0)
-            embed = discord.Embed(title=f"📊 {sym}", color=discord.Color.blue())
-            embed.add_field(name="Price", value=f"**{ltp}**")
-            embed.add_field(name="Change", value=str(change))
-            await interaction.followup.send(embed=embed)
-        else:
-            await interaction.followup.send("Market closed or symbol not found.")
-    except:
-        await interaction.followup.send("API Error.")
+@bot.tree.command(name="sync_now", description="Force refresh commands")
+async def sync_now(interaction: discord.Interaction):
+    await bot.tree.sync()
+    await interaction.response.send_message("✅ Commands synced globally!")
 
 @price_cmd.autocomplete('symbol')
 async def stock_auto(interaction: discord.Interaction, current: str):
-    matches = process.extract(current, bot.all_symbols, limit=5)
-    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches]
+    if not current:
+        return [app_commands.Choice(name=s, value=s) for s in bot.all_symbols[:10]]
+    matches = process.extract(current, bot.all_symbols, limit=10)
+    return [app_commands.Choice(name=m[0], value=m[0]) for m in matches if m[1] > 30]
+
+@bot.event
+async def on_ready():
+    print(f'🚀 {bot.user} is operational and ready for trading!')
 
 bot.run(TOKEN)
