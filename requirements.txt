@@ -4,5 +4,4 @@ beautifulsoup4
 matplotlib
 pandas
 python-dotenv
-thefuzz
 pytz
