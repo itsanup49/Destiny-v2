@@ -1,7 +1,7 @@
 discord.py
 requests
 beautifulsoup4
-thefuzz
-python-dotenv
-pandas
 matplotlib
+pandas
+python-dotenv
+thefuzz
