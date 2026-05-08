@@ -4,7 +4,6 @@ from discord import app_commands
 import os
 import asyncio
 import requests
-import httpx
 from bs4 import BeautifulSoup
 from thefuzz import process
 from dotenv import load_dotenv
@@ -17,100 +16,86 @@ class DestinyBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        self.all_symbols = []
+        # Expanded list for search
+        self.all_symbols = ["NABIL", "NICA", "ADBL", "HIDCL", "NIFRA", "HDL", "SHL", "AHPC", "UPPER", "NHPC", "GBIME", "NMB"]
         self.active_alerts = {} 
 
-    # --- ENGINE B: SHARESANSAR FALLBACK ---
-    def scrape_sharesansar(self, symbol):
-        """Standard scraping for when APIs are blocked or market is closed."""
+    def get_nepse_data(self, symbol):
+        """Scrapes Sharesansar - reliable even when APIs are down."""
         try:
-            url = "https://www.sharesansar.com/live-trading"
+            # We use the 'company' page for deeper data if live is closed
+            url = f"https://www.sharesansar.com/company/{symbol}"
             headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(url, headers=headers, timeout=5)
+            response = requests.get(url, headers=headers, timeout=10)
             soup = BeautifulSoup(response.text, 'html.parser')
-            table = soup.find('table', {'id': 'headertall'})
-            for row in table.find_all('tr'):
-                cols = row.find_all('td')
-                if len(cols) > 2 and cols[1].text.strip() == symbol:
-                    return {
-                        "ltp": cols[2].text.strip().replace(',', ''),
-                        "change": cols[3].text.strip(),
-                        "volume": cols[7].text.strip().replace(',', ''),
-                        "source": "Sharesansar (Backup)"
-                    }
+            
+            # Find LTP from the specific price display
+            price_box = soup.find('span', {'class': 'p_ltp'})
+            change_box = soup.find('span', {'class': 'p_price_change'})
+            
+            if price_box:
+                return {
+                    "ltp": price_box.text.strip().replace(',', ''),
+                    "change": change_box.text.strip() if change_box else "0",
+                    "status": "Success"
+                }
             return None
-        except: return None
+        except:
+            return None
 
     async def setup_hook(self):
-        print("🔄 Loading NEPSE symbols...")
-        # Since the API is new, we'll use a solid list first
-        self.all_symbols = ["NABIL", "NICA", "ADBL", "HIDCL", "NIFRA", "HDL", "SHL", "AHPC", "UPPER"]
         await self.tree.sync()
-        if not self.alert_engine.is_running():
-            self.alert_engine.start()
+        self.alert_engine.start()
 
     async def fire_pings(self, user_id, channel_id, message, count):
         channel = self.get_channel(channel_id)
         if not channel: return
         for _ in range(count):
-            await channel.send(f"⚠️ <@{user_id}> {message}")
+            await channel.send(f"🚨 <@{user_id}> {message}")
             await asyncio.sleep(3)
 
     @tasks.loop(seconds=20)
     async def alert_engine(self):
         if not self.active_alerts: return
-        # Logic follows the dual-check for alerts too
-        pass
+        for user_id, config in list(self.active_alerts.items()):
+            data = self.get_nepse_data(config['symbol'])
+            if data:
+                current_p = float(data['ltp'])
+                if current_p <= config['low']:
+                    msg = f"PRICE DROPPED! {config['symbol']} is at Rs. {current_p}"
+                    del self.active_alerts[user_id]
+                    await self.fire_pings(user_id, config['channel'], msg, 5)
+                elif current_p >= config['high']:
+                    msg = f"BREAKOUT! {config['symbol']} is at Rs. {current_p}"
+                    del self.active_alerts[user_id]
+                    await self.fire_pings(user_id, config['channel'], msg, 7)
 
 bot = DestinyBot()
 
-@bot.tree.command(name="price", description="Check LTP with Dual-Engine Failover")
+@bot.tree.command(name="price", description="Check LTP and Market Pressure")
 async def price_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
     sym = symbol.strip().upper()
+    data = bot.get_nepse_data(sym)
     
-    # --- ENGINE A: Try New SurajRimal API (REST Endpoint) ---
-    try:
-        async with httpx.AsyncClient() as client:
-            # We hit the live market endpoint of the new API
-            response = await client.get("https://nepsealpha.com/api/smth/live", timeout=5)
-            data = response.json()
-            # Searching for our stock in the new API format
-            stock = next((s for s in data if s['symbol'] == sym), None)
-            
-            if stock and float(stock.get('ltp', 0)) > 0:
-                ltp = stock.get('ltp')
-                change = stock.get('pointChange', 0)
-                vol = stock.get('volume', 0)
-                source = "SurajRimal API (Primary)"
-            else:
-                raise Exception("API empty")
+    if data:
+        ltp = data['ltp']
+        change = data['change']
+        color = 0x2ecc71 if "+" in change else 0xe74c3c if "-" in change else 0x34495e
+        
+        embed = discord.Embed(title=f"📊 {sym} Analysis", color=color)
+        embed.add_field(name="Current Price", value=f"**Rs. {ltp}**", inline=True)
+        embed.add_field(name="Change", value=f"{change}", inline=True)
+        embed.set_footer(text="Data Source: Sharesansar Real-time")
+        await interaction.followup.send(embed=embed)
+    else:
+        await interaction.followup.send(f"❌ Could not find **{sym}**. Ensure the symbol is correct.")
 
-    except:
-        # --- ENGINE B: SHARESANSAR FALLBACK ---
-        backup = bot.scrape_sharesansar(sym)
-        if backup:
-            ltp, change, vol, source = backup['ltp'], backup['change'], backup['volume'], backup['source']
-        else:
-            return await interaction.followup.send(f"❌ Both Engines failed to find **{sym}**.")
-
-    # --- BEAUTIFUL UI RENDERING ---
-    color = 0x2ecc71 if float(change) > 0 else 0xe74c3c if float(change) < 0 else 0x34495e
-    status_emoji = "📈" if float(change) > 0 else "📉" if float(change) < 0 else "⚖️"
-    
-    embed = discord.Embed(title=f"{status_emoji} {sym} Analysis", color=color)
-    embed.add_field(name="Current Price", value=f"**Rs. {ltp}**", inline=True)
-    embed.add_field(name="Change", value=f"{change}", inline=True)
-    embed.add_field(name="Volume", value=f"{vol} units", inline=False)
-    embed.set_footer(text=f"Data Source: {source} • Updated 2026")
-    
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="set_alert", description="Target pings: 5x for Low, 7x for High")
+@bot.tree.command(name="set_alert", description="Burst pings: 5x for Low, 7x for High")
 async def set_alert(interaction: discord.Interaction, symbol: str, low: float, high: float):
     sym = symbol.strip().upper()
     bot.active_alerts[interaction.user.id] = {"symbol": sym, "low": low, "high": high, "channel": interaction.channel_id}
-    await interaction.response.send_message(f"🎯 Alert Armed for **{sym}**! (Low: {low}, High: {high})")
+    await interaction.response.send_message(f"🎯 Alert Armed for **{sym}**!")
 
 @price_cmd.autocomplete('symbol')
 async def stock_auto(interaction: discord.Interaction, current: str):
@@ -118,3 +103,4 @@ async def stock_auto(interaction: discord.Interaction, current: str):
     return [app_commands.Choice(name=m[0], value=m[0]) for m in matches if m[1] > 30]
 
 bot.run(TOKEN)
+
