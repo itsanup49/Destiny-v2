@@ -1,40 +1,56 @@
-import requests
-from bs4 import BeautifulSoup
+import aiohttp
 from datetime import datetime
 import pytz
 
-def fetch_all_symbols():
-    try:
-        url = "https://www.sharesansar.com/today-price"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        res = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        table = soup.find('table')
-        symbols = []
-        if table:
-            for row in table.find_all('tr')[1:]:
-                cols = row.find_all('td')
-                if len(cols) > 1:
-                    sym = cols[1].text.strip()
-                    if sym: symbols.append(sym)
-        
-        if len(symbols) > 10:
-            return sorted(list(set(symbols)))
-    except:
-        pass
-    
-    # BACKUP LIST (If scraping fails, these will always show up)
-    return [
-        "NABIL", "NICA", "HDL", "NYADI", "AHPC", "SHL", "UPPER", "GBIME", "CIT", "HIDCL",
-        "NTC", "NBL", "ADBL", "SANIMA", "PCBL", "PRVU", "HRL", "NRIC", "API", "AKPL",
-        "UPW", "LEC", "MEN", "NIFRA", "MLBSL", "NICL", "NLIC", "SICL", "EBL", "MNHL"
-    ]
+# ── Nepal Time ────────────────────────────────────────────────────────────────
 
-ALL_SYMBOLS = fetch_all_symbols()
-
-def get_nepal_time():
+def get_nepal_time() -> datetime:
+    """Returns current Nepal time as a datetime object (for Discord embed timestamps)."""
     nepal_tz = pytz.timezone('Asia/Kathmandu')
-    now = datetime.now(nepal_tz)
-    # Nepal Market: Sunday (6) to Thursday (3)
-    is_open = (now.weekday() == 6 or now.weekday() < 4) and (11 <= now.hour < 15)
-    return now.strftime("%I:%M %p"), "🟢 OPEN" if is_open else "🔴 CLOSED"
+    return datetime.now(nepal_tz)
+
+def get_market_status() -> tuple[str, str]:
+    """Returns (time_string, status_emoji_string) — use this for display text."""
+    now = get_nepal_time()
+    # Market open: Sun–Thu, 11:00–15:00 NPT
+    is_open = (now.weekday() in (6, 0, 1, 2, 3)) and (11 <= now.hour < 15)
+    time_str = now.strftime("%I:%M %p")
+    status   = "🟢 OPEN" if is_open else "🔴 CLOSED"
+    return time_str, status
+
+# ── Symbol List ───────────────────────────────────────────────────────────────
+
+FALLBACK_SYMBOLS = sorted([
+    "NABIL", "NICA", "HDL", "NYADI", "AHPC", "SHL", "UPPER", "GBIME", "CIT",
+    "HIDCL", "NTC", "NBL", "ADBL", "SANIMA", "PCBL", "PRVU", "HRL", "NRIC",
+    "API", "AKPL", "UPW", "LEC", "MEN", "NIFRA", "MLBSL", "NICL", "NLIC",
+    "SICL", "EBL", "MNHL", "CHCL", "NHPC", "RIDI", "KKHC", "SHPC", "BPCL",
+    "MEGA", "SCB", "KBL", "LBBL", "MBL", "SHINE", "JBBL", "CORBL", "CZBIL",
+    "SBI", "NIB", "NIMB", "SRBL", "SAPDBL",
+])
+
+async def fetch_symbols_async() -> list[str]:
+    """Async symbol fetch from NepseAPI — call this once on bot startup."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get("https://nepseapi.surajrimal.dev/CompanyList") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    symbols = []
+                    for item in data:
+                        sym = (
+                            item.get("symbol") or
+                            item.get("Symbol") or
+                            item.get("stockSymbol")
+                        )
+                        if sym:
+                            symbols.append(sym.strip().upper())
+                    if len(symbols) > 10:
+                        return sorted(list(set(symbols)))
+    except Exception:
+        pass
+    return FALLBACK_SYMBOLS
+
+# Starts as fallback — bot.py will replace this on startup
+ALL_SYMBOLS = FALLBACK_SYMBOLS
