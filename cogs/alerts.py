@@ -1,90 +1,93 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import requests
+import aiohttp
 from bs4 import BeautifulSoup
+from .utils import ALL_SYMBOLS, get_nepal_time
+
+BASE_URL = "https://nepseapi.surajrimal.dev"
 
 class Alerts(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.active_alerts = {} 
+        self.active_alerts = {}  # { user_id: [ {symbol, upper, lower, channel_id} ] }
         self.check_alerts.start()
 
     def cog_unload(self):
         self.check_alerts.cancel()
 
-    def get_price(self, symbol):
-        """Uses the 24/7 data scraper for alerts"""
+    async def get_price(self, symbol: str) -> float | None:
+        """Async price fetch from NepseAPI LiveMarket."""
+        timeout = aiohttp.ClientTimeout(total=10)
         try:
-            url = "https://www.sharesansar.com/today-price"
-            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            table = soup.find('table')
-            if table:
-                for row in table.find_all('tr')[1:]:
-                    cols = row.find_all('td')
-                    if len(cols) > 10 and cols[1].text.strip() == symbol:
-                        return float(cols[6].text.strip().replace(',', ''))
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{BASE_URL}/LiveMarket") as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+                    for item in data:
+                        if item.get("symbol", "").upper() == symbol.upper():
+                            ltp = (
+                                item.get("ltp") or
+                                item.get("lastTradedPrice") or
+                                item.get("close")
+                            )
+                            return float(str(ltp).replace(",", "")) if ltp else None
+        except Exception:
             return None
-        except: return None
 
     @tasks.loop(minutes=3)
     async def check_alerts(self):
-        if not self.active_alerts: return
+        if not self.active_alerts:
+            return
+
+        # Cache the full LiveMarket once per loop instead of hitting API per user
+        timeout = aiohttp.ClientTimeout(total=10)
+        price_cache = {}
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{BASE_URL}/LiveMarket") as resp:
+                    if resp.status == 200:
+                        market_data = await resp.json()
+                        for item in market_data:
+                            sym = item.get("symbol", "").upper()
+                            ltp = (
+                                item.get("ltp") or
+                                item.get("lastTradedPrice") or
+                                item.get("close")
+                            )
+                            if sym and ltp:
+                                try:
+                                    price_cache[sym] = float(str(ltp).replace(",", ""))
+                                except ValueError:
+                                    pass
+        except Exception:
+            return  # If API is down, skip this loop cycle silently
 
         for user_id, alerts in list(self.active_alerts.items()):
-            for data in alerts[:]: # Iterate over a copy
-                current_price = self.get_price(data['symbol'])
-                
-                if current_price:
-                    triggered = False
-                    reason = ""
-                    
-                    # Check Upper Limit
-                    if data['upper'] and current_price >= data['upper']:
-                        triggered = True
-                        reason = f"🚀 Went ABOVE Rs. {data['upper']}"
-                    
-                    # Check Lower Limit
-                    elif data['lower'] and current_price <= data['lower']:
-                        triggered = True
-                        reason = f"📉 Dropped BELOW Rs. {data['lower']}"
-                        
-                    if triggered:
+            for alert_data in alerts[:]:
+                sym = alert_data["symbol"]
+                current_price = price_cache.get(sym)
+                if current_price is None:
+                    continue
+
+                triggered = False
+                reason = ""
+
+                if alert_data["upper"] and current_price >= alert_data["upper"]:
+                    triggered = True
+                    reason = f"🚀 Rose ABOVE Rs. **{alert_data['upper']:,.2f}**"
+                elif alert_data["lower"] and current_price <= alert_data["lower"]:
+                    triggered = True
+                    reason = f"📉 Dropped BELOW Rs. **{alert_data['lower']:,.2f}**"
+
+                if triggered:
+                    try:
                         user = await self.bot.fetch_user(user_id)
                         if user:
-                            embed = discord.Embed(title="🚨 DESTINY PRICE ALERT", color=0xF1C40F)
-                            embed.add_field(name="Symbol", value=f"**{data['symbol']}**", inline=True)
-                            embed.add_field(name="Current Price", value=f"**Rs. {current_price}**", inline=True)
-                            embed.add_field(name="Trigger", value=reason, inline=False)
-                            await user.send(embed=embed)
-                        
-                        # Remove the specific alert after firing
-                        self.active_alerts[user_id].remove(data)
-
-    @app_commands.command(name="alert", description="Set upper and/or lower price limits")
-    async def alert(self, interaction: discord.Interaction, symbol: str, upper_limit: float = None, lower_limit: float = None):
-        await interaction.response.defer(ephemeral=True)
-        
-        sym = symbol.upper()
-        
-        if upper_limit is None and lower_limit is None:
-            return await interaction.followup.send("❌ You must provide at least an `upper_limit` or a `lower_limit`.")
-
-        if interaction.user.id not in self.active_alerts:
-            self.active_alerts[interaction.user.id] = []
-            
-        self.active_alerts[interaction.user.id].append({
-            "symbol": sym,
-            "upper": upper_limit,
-            "lower": lower_limit
-        })
-        
-        msg = f"✅ Alert set for **{sym}**!\n"
-        if upper_limit: msg += f"📈 Will DM if price hits **Rs. {upper_limit}** or higher.\n"
-        if lower_limit: msg += f"📉 Will DM if price drops to **Rs. {lower_limit}** or lower."
-        
-        await interaction.followup.send(msg)
-
-async def setup(bot):
-    await bot.add_cog(Alerts(bot))
+                            embed = discord.Embed(
+                                title="🚨 Price Alert Triggered!",
+                                color=0xF1C40F,
+                                timestamp=get_nepal_time()
+                            )
+                            embed.add_field(name="Symbol", value=f"
